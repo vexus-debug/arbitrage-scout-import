@@ -33,7 +33,6 @@ const WORK_BUDGET = 4_000_000;
 /** Spot legs kept in the convert-bridge pool (turnover-filtered, ranked by USD-normalised gain). */
 const CONVERT_POOL = 90;
 /** Work units processed per animation frame while the incremental scan runs. */
-const SCAN_CHUNK = 6;
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -447,7 +446,7 @@ function Scanner() {
               <div><div className="flex items-center gap-3"><h2 className="text-lg font-semibold text-foreground">Opportunity feed</h2><span className="rounded-full bg-accent px-2 py-1 font-mono text-[10px] text-primary">{filtered.length} FOUND</span></div><p className="mt-1 text-xs text-muted-foreground">Executable cycles after estimated fees</p>
                 <div className="mt-3 w-full max-w-xs">
                   <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                    <span>{scanning ? `Scanning ${progress.done}/${progress.total} assets` : progress.total > 0 ? `Scanned all ${progress.total} assets` : "Awaiting market data"}</span>
+                    <span>{scanning ? `Scanning ${progress.done}/${progress.total} passes` : progress.total > 0 ? `Scanned all ${progress.assets} assets` : "Awaiting market data"}</span>
                     <span>{scanPercent}%</span>
                   </div>
                   <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-accent">
