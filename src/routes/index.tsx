@@ -28,7 +28,9 @@ type Opportunity = { id: string; assets: string[]; legs: Leg[]; gross: number; n
 const REFRESH_MS = 10_000;
 const DEFAULT_FEE = 0.001;
 const DEFAULT_CONVERT_SPREAD = 0.002;
-const CONVERT_HUB_LIMIT = 60;
+/** Convert reaches every listed asset; branching is capped per depth so the DFS stays interactive. */
+const CONVERT_BRANCH_ROOT = 240;
+const CONVERT_BRANCH_DEEP = 24;
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -117,37 +119,45 @@ function buildUsdIndex(instruments: Instrument[], tickers: Ticker[]) {
  * Bybit Convert lets any listed asset be swapped directly for any other, bypassing the
  * missing spot pairs (xStocks are USDT-only in spot). Convert quotes are not on the public
  * API, so each convert edge is priced from the USD reference mid minus an assumed spread.
+ * The universe covers every asset with a USD reference (all coins, quote currencies and
+ * xStocks); edge lists are built lazily and ranked by turnover so the DFS can cap branching.
  */
-function buildConvertEdges(instruments: Instrument[], tickers: Ticker[], spread: number) {
+function buildConvertModel(instruments: Instrument[], tickers: Ticker[], spread: number) {
   const { usd, turnover, stocks } = buildUsdIndex(instruments, tickers);
-  const hubs = [...turnover.entries()]
-    .filter(([asset]) => usd.has(asset) && !stocks.has(asset))
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, CONVERT_HUB_LIMIT)
-    .map(([asset]) => asset);
-  const universe = [...new Set([...stocks, ...hubs, "USDT", "USDC"])].filter((asset) => (usd.get(asset) ?? 0) > 0);
+  const universe = [...usd.keys()]
+    .filter((asset) => (usd.get(asset) ?? 0) > 0)
+    .sort((a, b) => (turnover.get(b) ?? 0) - (turnover.get(a) ?? 0));
 
-  const edges = new Map<string, Edge[]>();
-  for (const from of universe) {
+  const edgeFor = (from: string, to: string): Edge | null => {
+    if (from === to) return null;
+    const fromUsd = usd.get(from) ?? 0;
+    const toUsd = usd.get(to) ?? 0;
+    if (fromUsd <= 0 || toUsd <= 0) return null;
+    return {
+      to,
+      symbol: `CONVERT:${from}->${to}`,
+      side: "Convert",
+      rate: (fromUsd / toUsd) * (1 - spread),
+      price: fromUsd / toUsd,
+      stock: stocks.has(from) || stocks.has(to),
+      volume: Math.min(turnover.get(from) ?? Infinity, turnover.get(to) ?? Infinity),
+    };
+  };
+
+  const cache = new Map<string, Edge[]>();
+  const edgesFrom = (from: string) => {
+    const cached = cache.get(from);
+    if (cached) return cached;
     const list: Edge[] = [];
     for (const to of universe) {
-      if (from === to) continue;
-      const fromUsd = usd.get(from) ?? 0;
-      const toUsd = usd.get(to) ?? 0;
-      if (fromUsd <= 0 || toUsd <= 0) continue;
-      list.push({
-        to,
-        symbol: `CONVERT:${from}->${to}`,
-        side: "Convert",
-        rate: (fromUsd / toUsd) * (1 - spread),
-        price: fromUsd / toUsd,
-        stock: stocks.has(from) || stocks.has(to),
-        volume: Math.min(turnover.get(from) ?? Infinity, turnover.get(to) ?? Infinity),
-      });
+      const edge = edgeFor(from, to);
+      if (edge) list.push(edge);
     }
-    edges.set(from, list);
-  }
-  return { edges, stocks };
+    cache.set(from, list);
+    return list;
+  };
+
+  return { stocks, universe, edgeFor, edgesFrom };
 }
 
 function buildOpportunities(
@@ -159,10 +169,11 @@ function buildOpportunities(
   convertSpread: number,
 ) {
   const graph = buildGraph(instruments, tickers);
-  const convert = useConvert ? buildConvertEdges(instruments, tickers, convertSpread) : null;
+  const convert = useConvert ? buildConvertModel(instruments, tickers, convertSpread) : null;
+  const stockAssets = convert?.stocks ?? buildUsdIndex(instruments, tickers).stocks;
   const starts = ["USDT", "USDC", "BTC", "ETH"].filter((asset) => graph.has(asset));
   const candidates: Opportunity[] = [];
-  const isStockAsset = (asset: string) => convert?.stocks.has(asset) ?? false;
+  const isStockAsset = (asset: string) => stockAssets.has(asset);
 
   for (const start of starts) {
     const path: Leg[] = [];
@@ -170,7 +181,13 @@ function buildOpportunities(
     const usedSymbols = new Set<string>();
 
     const walk = (asset: string, amount: number, minVolume: number) => {
-      const edges = [...(graph.get(asset) ?? []), ...(convert?.edges.get(asset) ?? [])];
+      const spot = graph.get(asset) ?? [];
+      const branch = convert
+        ? convert.edgesFrom(asset).slice(0, path.length === 0 ? CONVERT_BRANCH_ROOT : CONVERT_BRANCH_DEEP)
+        : [];
+      const closing = convert?.edgeFor(asset, start) ?? null;
+      const edges = [...spot, ...branch];
+      if (closing && !branch.some((edge) => edge.symbol === closing.symbol)) edges.push(closing);
       if (edges.length === 0) return;
       for (const edge of edges) {
         if (usedSymbols.has(edge.symbol)) continue;
@@ -326,10 +343,12 @@ function Scanner() {
               <label className="block"><span className="mb-2 flex items-center justify-between text-xs font-medium text-foreground">Fee per leg <span className="font-mono text-muted-foreground">{(fee * 100).toFixed(2)}%</span></span><input className="w-full accent-primary" type="range" min="0" max="0.003" step="0.0001" value={fee} onChange={(event) => setFee(Number(event.target.value))} /></label>
               <label className="block"><span className="mb-2 block text-xs font-medium text-foreground">Route universe</span><select className="select-control h-10 w-full rounded-md px-3 text-sm" value={assetFilter} onChange={(event) => setAssetFilter(event.target.value)}><option>All routes</option><option>Crypto only</option><option>1+ xStock</option><option>2+ xStocks</option><option>3+ xStocks</option></select></label>
               <label className="block"><span className="mb-2 flex items-center justify-between text-xs font-medium text-foreground">Max legs per cycle <span className="font-mono text-muted-foreground">{maxLegs}</span></span><select className="select-control h-10 w-full rounded-md px-3 text-sm" value={maxLegs} onChange={(event) => setMaxLegs(Number(event.target.value))}><option value={3}>3 legs</option><option value={4}>4 legs</option><option value={5}>5 legs (slow)</option></select></label>
+              <div className="flex items-center justify-between border-t border-border pt-5"><div><div className="text-sm font-medium text-foreground">Bybit Convert legs</div><div className="mt-1 text-xs text-muted-foreground">Stock → stock hops off spot</div></div><button aria-label="Toggle Bybit Convert legs" className="switch-track flex h-5 w-9 cursor-pointer items-center rounded-full p-0.5 transition-colors" data-on={useConvert} onClick={() => setUseConvert((value) => !value)}><span className="switch-thumb h-4 w-4 rounded-full transition-transform" /></button></div>
+              <label className={`block transition-opacity ${useConvert ? "" : "pointer-events-none opacity-40"}`}><span className="mb-2 flex items-center justify-between text-xs font-medium text-foreground">Convert spread <span className="font-mono text-muted-foreground">{(convertSpread * 100).toFixed(2)}%</span></span><input className="w-full accent-primary" type="range" min="0" max="0.01" step="0.0005" value={convertSpread} disabled={!useConvert} onChange={(event) => setConvertSpread(Number(event.target.value))} /></label>
               <div className="flex items-center justify-between border-t border-border pt-5"><div><div className="text-sm font-medium text-foreground">Auto refresh</div><div className="mt-1 text-xs text-muted-foreground">Every 10 seconds</div></div><button aria-label="Toggle auto refresh" className="switch-track flex h-5 w-9 cursor-pointer items-center rounded-full p-0.5 transition-colors" data-on={autoRefresh} onClick={() => setAutoRefresh((value) => !value)}><span className="switch-thumb h-4 w-4 rounded-full transition-transform" /></button></div>
               <Button className="scan-button w-full" onClick={() => void scan()} disabled={loading}><RefreshCw className={loading ? "animate-spin" : ""} /> Scan now</Button>
             </div>
-            <div className="mt-6 flex gap-2 rounded-md border border-warning/25 bg-warning/10 p-3 text-[11px] leading-4 text-warning"><Info className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>All {xstocks.length} Bybit xStocks trade only against USDT, with no stock/stock or stock/USDC market. A cycle can therefore touch at most one xStock — multi-stock routes will stay empty until Bybit lists another xStock quote pair. The scanner checks every listing each refresh, so they appear the moment they exist.</span></div>
+            <div className="mt-6 flex gap-2 rounded-md border border-warning/25 bg-warning/10 p-3 text-[11px] leading-4 text-warning"><Info className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{useConvert ? <>All {xstocks.length} xStocks trade only against USDT in spot, so stock → stock hops use Bybit Convert. Convert quotes are not public: legs are modelled at the USD reference mid minus the {(convertSpread * 100).toFixed(2)}% spread above, with no exchange fee. Real quotes may be wider, so verify each Convert leg before executing.</> : <>Convert legs are off, so routes are limited to spot pairs and can touch at most one xStock (all {xstocks.length} are USDT-only). Enable Convert to search multi-stock cycles.</>}</span></div>
           </aside>
         </section>
 
@@ -351,7 +370,7 @@ function Metric({ label, value, detail, icon, tone = "default" }: { label: strin
 function OpportunityTable({ opportunities, loading }: { opportunities: Opportunity[]; loading: boolean }) {
   if (loading && opportunities.length === 0) return <div className="flex min-h-[300px] items-center justify-center gap-3 text-sm text-muted-foreground"><RefreshCw className="h-4 w-4 animate-spin text-primary" />Reading live order books…</div>;
   if (opportunities.length === 0) return <div className="flex min-h-[300px] flex-col items-center justify-center px-6 text-center"><div className="mb-3 rounded-full bg-accent p-3 text-primary"><Search className="h-5 w-5" /></div><h3 className="font-medium text-foreground">No routes above threshold</h3><p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">The scanner found no net-positive cycle at the current fee and profit settings. Lower the floor to inspect the live market.</p></div>;
-  return <div className="table-scroll"><div className="min-w-[690px]"><div className="grid grid-cols-[1.2fr_.7fr_.7fr_.7fr_30px] gap-4 px-5 py-3 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground"><span>Route</span><span>Net edge</span><span>Gross</span><span>Liquidity</span><span /></div>{opportunities.slice(0, 8).map((item, index) => { const [start, middle, end] = item.assets; if (!start || !middle || !end) return null; return <div className="data-row grid grid-cols-[1.2fr_.7fr_.7fr_.7fr_30px] items-center gap-4 px-5 py-4" key={item.id}><div className="flex items-center gap-2"><span className="w-4 font-mono text-[10px] text-muted-foreground">{String(index + 1).padStart(2, "0")}</span><div className="flex items-center gap-1.5"><Asset name={start} /><span className="route-arrow">→</span><Asset name={middle} /><span className="route-arrow">→</span><Asset name={end} /><span className="route-arrow">→</span><Asset name={start} /></div>{item.stock && <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-medium text-warning">xS</span>}</div><span className="font-mono text-sm font-semibold text-primary">{formatPercent(item.net)}</span><span className="font-mono text-xs text-muted-foreground">{formatPercent(item.gross)}</span><span className="font-mono text-xs text-muted-foreground">${(item.volume / 1000000).toFixed(1)}m</span><Button variant="ghost" size="icon" aria-label={`Inspect ${item.id}`}><ChevronDown className="h-4 w-4 -rotate-90" /></Button></div>; })}</div></div>;
+  return <div className="table-scroll"><div className="min-w-[690px]"><div className="grid grid-cols-[1.6fr_.7fr_.7fr_.7fr_30px] gap-4 px-5 py-3 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground"><span>Route</span><span>Net edge</span><span>Gross</span><span>Liquidity</span><span /></div>{opportunities.slice(0, 8).map((item, index) => { const start = item.assets[0]; if (!start || item.legs.length === 0) return null; return <div className="data-row grid grid-cols-[1.6fr_.7fr_.7fr_.7fr_30px] items-center gap-4 px-5 py-4" key={item.id}><div className="flex flex-wrap items-center gap-2"><span className="w-4 font-mono text-[10px] text-muted-foreground">{String(index + 1).padStart(2, "0")}</span><div className="flex flex-wrap items-center gap-1.5"><Asset name={start} />{item.legs.map((leg, legIndex) => <span className="flex items-center gap-1.5" key={`${item.id}-${legIndex}-${leg.symbol}`}><span className={`route-arrow ${leg.side === "Convert" ? "text-primary" : ""}`} title={leg.side === "Convert" ? `Bybit Convert ${leg.from} → ${leg.to}` : `${leg.side} ${leg.symbol} @ ${formatPrice(leg.price)}`}>{leg.side === "Convert" ? "⇢" : "→"}</span><Asset name={leg.to} /></span>)}</div>{item.stocks > 0 && <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-medium text-warning">{item.stocks > 1 ? `${item.stocks}× xS` : "xS"}</span>}{item.converts > 0 && <span className="rounded bg-accent px-1.5 py-0.5 text-[9px] font-medium text-primary">{item.converts > 1 ? `${item.converts}× CONVERT` : "CONVERT"}</span>}</div><span className="font-mono text-sm font-semibold text-primary">{formatPercent(item.net)}</span><span className="font-mono text-xs text-muted-foreground">{formatPercent(item.gross)}</span><span className="font-mono text-xs text-muted-foreground">${(item.volume / 1000000).toFixed(1)}m</span><Button variant="ghost" size="icon" aria-label={`Inspect ${item.id}`}><ChevronDown className="h-4 w-4 -rotate-90" /></Button></div>; })}</div></div>;
 }
 
 function MarketTable({ instruments, tickers, query }: { instruments: Instrument[]; tickers: Ticker[]; query: string }) {
