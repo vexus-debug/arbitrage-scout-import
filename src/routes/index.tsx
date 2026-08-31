@@ -470,7 +470,7 @@ function Scanner() {
                 </div></div>
               <div className="flex gap-1 rounded-md bg-surface-subtle p-1"><button className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${tab === "opportunities" ? "bg-accent text-primary" : "text-muted-foreground hover:text-foreground"}`} onClick={() => setTab("opportunities")}>Routes</button><button className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${tab === "markets" ? "bg-accent text-primary" : "text-muted-foreground hover:text-foreground"}`} onClick={() => setTab("markets")}>Markets</button></div>
             </div>
-            {tab === "opportunities" ? <OpportunityTable opportunities={filtered} loading={loading} onSelect={setSelected} /> : <MarketTable instruments={market?.instruments ?? []} tickers={market?.tickers ?? []} query={query} />
+            {tab === "opportunities" ? <OpportunityTable opportunities={filtered} loading={loading} onSelect={setSelected} /> : <MarketTable instruments={market?.instruments ?? []} tickers={market?.tickers ?? []} query={query} />}
           </div>
 
           <aside className="panel rounded-lg p-5">
