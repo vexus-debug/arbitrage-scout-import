@@ -339,8 +339,10 @@ function Scanner() {
       if (!response.ok) throw new Error(data.error ?? "Market data unavailable");
       setMarket(data);
       setError(null);
+      return data as MarketResponse;
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Market data unavailable");
+      return null;
     } finally {
       setLoading(false);
     }
@@ -353,19 +355,29 @@ function Scanner() {
     return () => window.clearInterval(timer);
   }, [autoRefresh, scan]);
 
-  // Incremental scan: every asset on the platform is used as a cycle start, then every
-  // convert-bridged combination is enumerated. Work is time-sliced so the tab stays responsive
-  // while a full-universe pass runs, and results stream in as they are found.
+  // Scanning is manual: a request snapshot is only created when the user hits "Scan now".
+  // Work is time-sliced so the tab stays responsive while a full-universe pass runs.
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
   const [progress, setProgress] = useState({ done: 0, total: 0, assets: 0 });
+  type ScanRequest = { market: MarketResponse; fee: number; maxLegs: number; useConvert: boolean; convertSpread: number; id: number };
+  const [scanRequest, setScanRequest] = useState<ScanRequest | null>(null);
+
+  const settings = { fee, maxLegs, useConvert, convertSpread };
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const marketRef = useRef(market);
+  marketRef.current = market;
+
+  const runScan = useCallback(async () => {
+    const data = await scan();
+    const source = data ?? marketRef.current;
+    if (!source) return;
+    setScanRequest({ market: source, ...settingsRef.current, id: Date.now() });
+  }, [scan]);
 
   useEffect(() => {
-    if (!market) {
-      setOpportunities([]);
-      setProgress({ done: 0, total: 0, assets: 0 });
-      return;
-    }
-    const pass = createScanPass(market.instruments, market.tickers, fee, maxLegs, useConvert, convertSpread);
+    if (!scanRequest) return;
+    const pass = createScanPass(scanRequest.market.instruments, scanRequest.market.tickers, scanRequest.fee, scanRequest.maxLegs, scanRequest.useConvert, scanRequest.convertSpread);
     const total = pass.steps.length;
     const best = new Map<string, Opportunity>();
     let cursor = 0;
@@ -393,7 +405,7 @@ function Scanner() {
 
     frame = window.requestAnimationFrame(step);
     return () => { cancelled = true; window.cancelAnimationFrame(frame); };
-  }, [market, fee, maxLegs, useConvert, convertSpread]);
+  }, [scanRequest]);
 
 
   const scanning = progress.total > 0 && progress.done < progress.total;
