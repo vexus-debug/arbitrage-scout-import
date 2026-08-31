@@ -279,7 +279,7 @@ function createScanPass(
 
   /** Convert-bridged combinations rooted at one spot leg (called per progress chunk). */
   const scanConvertFrom = (rootIndex: number) => {
-    const root = convertPool[rootIndex];
+    const root = convertRoots[rootIndex];
     if (!root) return [];
     const found: Opportunity[] = [];
     const push = (selection: Scored[]) => {
@@ -305,10 +305,10 @@ function createScanPass(
 
   const steps: Array<() => Opportunity[]> = [
     ...spotStarts.map((start) => () => scanSpotFrom(start)),
-    ...convertPool.map((_, position) => () => scanConvertFrom(position)),
+    ...convertRoots.map((_, position) => () => scanConvertFrom(position)),
   ];
 
-  return { steps, assetCount: spotStarts.length, convertCombos: convertPool.length };
+  return { steps, assetCount: spotStarts.length, convertCombos: convertRoots.length };
 }
 
 function Asset({ name }: { name: string }) {
