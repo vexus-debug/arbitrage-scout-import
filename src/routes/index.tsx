@@ -229,6 +229,9 @@ function createScanPass(
     }
     scored.sort((a, b) => b.norm - a.norm);
   }
+  /** Every scored leg gets its own pass, so no leg is excluded as a route root. */
+  const convertRoots = scored;
+  /** Bounded pool used for the 2nd/3rd legs so per-root work stays sub-second. */
   const convertPool = scored.slice(0, CONVERT_POOL);
 
   const convertEdge = (from: string, to: string): Leg | null => {
@@ -276,7 +279,7 @@ function createScanPass(
 
   /** Convert-bridged combinations rooted at one spot leg (called per progress chunk). */
   const scanConvertFrom = (rootIndex: number) => {
-    const root = convertPool[rootIndex];
+    const root = convertRoots[rootIndex];
     if (!root) return [];
     const found: Opportunity[] = [];
     const push = (selection: Scored[]) => {
@@ -302,10 +305,10 @@ function createScanPass(
 
   const steps: Array<() => Opportunity[]> = [
     ...spotStarts.map((start) => () => scanSpotFrom(start)),
-    ...convertPool.map((_, position) => () => scanConvertFrom(position)),
+    ...convertRoots.map((_, position) => () => scanConvertFrom(position)),
   ];
 
-  return { steps, assetCount: spotStarts.length, convertCombos: convertPool.length };
+  return { steps, assetCount: spotStarts.length, convertCombos: convertRoots.length };
 }
 
 function Asset({ name }: { name: string }) {
