@@ -169,10 +169,11 @@ function buildOpportunities(
   convertSpread: number,
 ) {
   const graph = buildGraph(instruments, tickers);
-  const convert = useConvert ? buildConvertEdges(instruments, tickers, convertSpread) : null;
+  const convert = useConvert ? buildConvertModel(instruments, tickers, convertSpread) : null;
+  const stockAssets = convert?.stocks ?? buildUsdIndex(instruments, tickers).stocks;
   const starts = ["USDT", "USDC", "BTC", "ETH"].filter((asset) => graph.has(asset));
   const candidates: Opportunity[] = [];
-  const isStockAsset = (asset: string) => convert?.stocks.has(asset) ?? false;
+  const isStockAsset = (asset: string) => stockAssets.has(asset);
 
   for (const start of starts) {
     const path: Leg[] = [];
@@ -180,7 +181,13 @@ function buildOpportunities(
     const usedSymbols = new Set<string>();
 
     const walk = (asset: string, amount: number, minVolume: number) => {
-      const edges = [...(graph.get(asset) ?? []), ...(convert?.edges.get(asset) ?? [])];
+      const spot = graph.get(asset) ?? [];
+      const branch = convert
+        ? convert.edgesFrom(asset).slice(0, path.length === 0 ? CONVERT_BRANCH_ROOT : CONVERT_BRANCH_DEEP)
+        : [];
+      const closing = convert?.edgeFor(asset, start) ?? null;
+      const edges = [...spot, ...branch];
+      if (closing && !branch.some((edge) => edge.symbol === closing.symbol)) edges.push(closing);
       if (edges.length === 0) return;
       for (const edge of edges) {
         if (usedSymbols.has(edge.symbol)) continue;
