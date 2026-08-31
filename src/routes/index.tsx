@@ -119,37 +119,45 @@ function buildUsdIndex(instruments: Instrument[], tickers: Ticker[]) {
  * Bybit Convert lets any listed asset be swapped directly for any other, bypassing the
  * missing spot pairs (xStocks are USDT-only in spot). Convert quotes are not on the public
  * API, so each convert edge is priced from the USD reference mid minus an assumed spread.
+ * The universe covers every asset with a USD reference (all coins, quote currencies and
+ * xStocks); edge lists are built lazily and ranked by turnover so the DFS can cap branching.
  */
-function buildConvertEdges(instruments: Instrument[], tickers: Ticker[], spread: number) {
+function buildConvertModel(instruments: Instrument[], tickers: Ticker[], spread: number) {
   const { usd, turnover, stocks } = buildUsdIndex(instruments, tickers);
-  const hubs = [...turnover.entries()]
-    .filter(([asset]) => usd.has(asset) && !stocks.has(asset))
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, CONVERT_HUB_LIMIT)
-    .map(([asset]) => asset);
-  const universe = [...new Set([...stocks, ...hubs, "USDT", "USDC"])].filter((asset) => (usd.get(asset) ?? 0) > 0);
+  const universe = [...usd.keys()]
+    .filter((asset) => (usd.get(asset) ?? 0) > 0)
+    .sort((a, b) => (turnover.get(b) ?? 0) - (turnover.get(a) ?? 0));
 
-  const edges = new Map<string, Edge[]>();
-  for (const from of universe) {
+  const edgeFor = (from: string, to: string): Edge | null => {
+    if (from === to) return null;
+    const fromUsd = usd.get(from) ?? 0;
+    const toUsd = usd.get(to) ?? 0;
+    if (fromUsd <= 0 || toUsd <= 0) return null;
+    return {
+      to,
+      symbol: `CONVERT:${from}->${to}`,
+      side: "Convert",
+      rate: (fromUsd / toUsd) * (1 - spread),
+      price: fromUsd / toUsd,
+      stock: stocks.has(from) || stocks.has(to),
+      volume: Math.min(turnover.get(from) ?? Infinity, turnover.get(to) ?? Infinity),
+    };
+  };
+
+  const cache = new Map<string, Edge[]>();
+  const edgesFrom = (from: string) => {
+    const cached = cache.get(from);
+    if (cached) return cached;
     const list: Edge[] = [];
     for (const to of universe) {
-      if (from === to) continue;
-      const fromUsd = usd.get(from) ?? 0;
-      const toUsd = usd.get(to) ?? 0;
-      if (fromUsd <= 0 || toUsd <= 0) continue;
-      list.push({
-        to,
-        symbol: `CONVERT:${from}->${to}`,
-        side: "Convert",
-        rate: (fromUsd / toUsd) * (1 - spread),
-        price: fromUsd / toUsd,
-        stock: stocks.has(from) || stocks.has(to),
-        volume: Math.min(turnover.get(from) ?? Infinity, turnover.get(to) ?? Infinity),
-      });
+      const edge = edgeFor(from, to);
+      if (edge) list.push(edge);
     }
-    edges.set(from, list);
-  }
-  return { edges, stocks };
+    cache.set(from, list);
+    return list;
+  };
+
+  return { stocks, universe, edgeFor, edgesFrom };
 }
 
 function buildOpportunities(
