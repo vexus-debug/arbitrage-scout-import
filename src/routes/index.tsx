@@ -170,7 +170,7 @@ function buildConvertModel(instruments: Instrument[], tickers: Ticker[], spread:
   return { stocks, universe, edgeFor, edgesFrom };
 }
 
-function buildOpportunities(
+function createScanPass(
   instruments: Instrument[],
   tickers: Ticker[],
   fee: number,
@@ -181,13 +181,25 @@ function buildOpportunities(
   const graph = buildGraph(instruments, tickers);
   for (const edges of graph.values()) edges.sort((a, b) => b.volume - a.volume);
   const convert = useConvert ? buildConvertModel(instruments, tickers, convertSpread) : null;
-  const stockAssets = convert?.stocks ?? buildUsdIndex(instruments, tickers).stocks;
-  const starts = ["USDT", "USDC", "BTC", "ETH"].filter((asset) => graph.has(asset));
-  const candidates: Opportunity[] = [];
+  const index = buildUsdIndex(instruments, tickers);
+  const stockAssets = convert?.stocks ?? index.stocks;
   const isStockAsset = (asset: string) => stockAssets.has(asset);
-  let work = 0;
 
-  for (const start of starts) {
+  // Every asset on the platform is a start: all spot coins and quote currencies plus every
+  // xStock reachable through Convert. Ordered by turnover so the biggest markets resolve first.
+  const startSet = new Set<string>([...graph.keys()]);
+  for (const asset of index.usd.keys()) if (graph.has(asset) || convert) startSet.add(asset);
+  const priority = new Map(["USDT", "USDC", "BTC", "ETH"].map((asset, rank) => [asset, rank]));
+  const starts = [...startSet].sort((a, b) => {
+    const pa = priority.get(a) ?? Infinity;
+    const pb = priority.get(b) ?? Infinity;
+    if (pa !== pb) return pa - pb;
+    return (index.turnover.get(b) ?? 0) - (index.turnover.get(a) ?? 0);
+  });
+
+  const scanFrom = (start: string) => {
+    const candidates: Opportunity[] = [];
+    let work = 0;
     const path: Leg[] = [];
     const visited = new Set<string>([start]);
     const usedSymbols = new Set<string>();
@@ -249,14 +261,10 @@ function buildOpportunities(
     };
 
     walk(start, 1, Infinity);
-  }
+    return candidates;
+  };
 
-  const deduped = new Map<string, Opportunity>();
-  for (const candidate of candidates) {
-    const key = candidate.legs.map((leg) => leg.symbol).sort().join("/");
-    if (!deduped.has(key) || (deduped.get(key)?.net ?? -Infinity) < candidate.net) deduped.set(key, candidate);
-  }
-  return [...deduped.values()].sort((a, b) => b.net - a.net);
+  return { starts, scanFrom };
 }
 
 function Asset({ name }: { name: string }) {
