@@ -28,7 +28,9 @@ type Opportunity = { id: string; assets: string[]; legs: Leg[]; gross: number; n
 const REFRESH_MS = 10_000;
 const DEFAULT_FEE = 0.001;
 const DEFAULT_CONVERT_SPREAD = 0.002;
-const CONVERT_HUB_LIMIT = 60;
+/** Convert reaches every listed asset; branching is capped per depth so the DFS stays interactive. */
+const CONVERT_BRANCH_ROOT = 240;
+const CONVERT_BRANCH_DEEP = 24;
 
 export const Route = createFileRoute("/")({
   head: () => ({
