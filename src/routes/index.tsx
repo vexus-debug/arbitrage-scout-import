@@ -36,6 +36,8 @@ const SPOT_BRANCH_ROOT = 200;
 const SPOT_BRANCH_DEEP = 40;
 /** Hard ceiling on DFS edge expansions per scan, so a full-universe search can never hang the tab. */
 const WORK_BUDGET = 250_000;
+/** Per-asset convert edge list size (turnover-ranked) kept bounded to limit allocation churn. */
+const CONVERT_EDGE_CAP = 300;
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -155,6 +157,7 @@ function buildConvertModel(instruments: Instrument[], tickers: Ticker[], spread:
     if (cached) return cached;
     const list: Edge[] = [];
     for (const to of universe) {
+      if (list.length >= CONVERT_EDGE_CAP) break;
       const edge = edgeFor(from, to);
       if (edge) list.push(edge);
     }
