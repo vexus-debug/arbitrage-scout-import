@@ -29,8 +29,15 @@ const REFRESH_MS = 10_000;
 const DEFAULT_FEE = 0.001;
 const DEFAULT_CONVERT_SPREAD = 0.002;
 /** Convert reaches every listed asset; branching is capped per depth so the DFS stays interactive. */
-const CONVERT_BRANCH_ROOT = 240;
-const CONVERT_BRANCH_DEEP = 24;
+const CONVERT_BRANCH_ROOT = 90;
+const CONVERT_BRANCH_DEEP = 10;
+/** Spot edges are ranked by turnover and capped too — USDT alone has hundreds of pairs. */
+const SPOT_BRANCH_ROOT = 200;
+const SPOT_BRANCH_DEEP = 40;
+/** Hard ceiling on DFS edge expansions per scan, so a full-universe search can never hang the tab. */
+const WORK_BUDGET = 250_000;
+/** Per-asset convert edge list size (turnover-ranked) kept bounded to limit allocation churn. */
+const CONVERT_EDGE_CAP = 300;
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -150,6 +157,7 @@ function buildConvertModel(instruments: Instrument[], tickers: Ticker[], spread:
     if (cached) return cached;
     const list: Edge[] = [];
     for (const to of universe) {
+      if (list.length >= CONVERT_EDGE_CAP) break;
       const edge = edgeFor(from, to);
       if (edge) list.push(edge);
     }
@@ -169,11 +177,13 @@ function buildOpportunities(
   convertSpread: number,
 ) {
   const graph = buildGraph(instruments, tickers);
+  for (const edges of graph.values()) edges.sort((a, b) => b.volume - a.volume);
   const convert = useConvert ? buildConvertModel(instruments, tickers, convertSpread) : null;
   const stockAssets = convert?.stocks ?? buildUsdIndex(instruments, tickers).stocks;
   const starts = ["USDT", "USDC", "BTC", "ETH"].filter((asset) => graph.has(asset));
   const candidates: Opportunity[] = [];
   const isStockAsset = (asset: string) => stockAssets.has(asset);
+  let work = 0;
 
   for (const start of starts) {
     const path: Leg[] = [];
@@ -181,16 +191,20 @@ function buildOpportunities(
     const usedSymbols = new Set<string>();
 
     const walk = (asset: string, amount: number, minVolume: number) => {
-      const spot = graph.get(asset) ?? [];
+      if (work > WORK_BUDGET) return;
+      const root = path.length === 0;
+      const spot = (graph.get(asset) ?? []).slice(0, root ? SPOT_BRANCH_ROOT : SPOT_BRANCH_DEEP);
       const branch = convert
-        ? convert.edgesFrom(asset).slice(0, path.length === 0 ? CONVERT_BRANCH_ROOT : CONVERT_BRANCH_DEEP)
+        ? convert.edgesFrom(asset).slice(0, root ? CONVERT_BRANCH_ROOT : CONVERT_BRANCH_DEEP)
         : [];
       const closing = convert?.edgeFor(asset, start) ?? null;
       const edges = [...spot, ...branch];
       if (closing && !branch.some((edge) => edge.symbol === closing.symbol)) edges.push(closing);
       if (edges.length === 0) return;
       for (const edge of edges) {
+        if (work++ > WORK_BUDGET) return;
         if (usedSymbols.has(edge.symbol)) continue;
+
         const next = amount * edge.rate;
         const volume = Math.min(minVolume, edge.volume);
         const leg: Leg = { symbol: edge.symbol, from: asset, to: edge.to, side: edge.side, price: edge.price, stock: edge.stock };
