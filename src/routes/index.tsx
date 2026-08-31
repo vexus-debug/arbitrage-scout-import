@@ -28,14 +28,13 @@ type Opportunity = { id: string; assets: string[]; legs: Leg[]; gross: number; n
 const REFRESH_MS = 10_000;
 const DEFAULT_FEE = 0.001;
 const DEFAULT_CONVERT_SPREAD = 0.002;
-/** Convert reaches every listed asset; branching is capped per depth so the DFS stays interactive. */
-const CONVERT_BRANCH_ROOT = 60;
-const CONVERT_BRANCH_DEEP = 8;
-/** Spot edges are ranked by turnover and capped too — USDT alone has hundreds of pairs. */
-const SPOT_BRANCH_ROOT = 120;
-const SPOT_BRANCH_DEEP = 24;
-/** Hard ceiling on DFS edge expansions per start asset, so no single asset can stall the pass. */
-const WORK_BUDGET = 20_000;
+/**
+ * Convert reaches every listed asset. Spot edges are never capped; convert fan-out is only
+ * capped below the first hop, where the full universe would be combinatorially impossible.
+ */
+const CONVERT_BRANCH_DEEP = 48;
+/** Safety ceiling on DFS expansions per start asset; only trips on pathological fan-out. */
+const WORK_BUDGET = 4_000_000;
 /** Per-asset convert edge list size (turnover-ranked) kept bounded to limit allocation churn. */
 const CONVERT_EDGE_CAP = Infinity;
 /** Start assets processed per animation frame while the incremental scan runs. */
