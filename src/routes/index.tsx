@@ -351,32 +351,32 @@ function Scanner() {
     return () => window.clearInterval(timer);
   }, [autoRefresh, scan]);
 
-  // Incremental scan: every asset on the platform is used as a cycle start. Assets are processed
-  // in time-sliced chunks so the tab stays responsive while a full-universe pass runs, and
-  // results stream in as they are found.
+  // Incremental scan: every asset on the platform is used as a cycle start, then every
+  // convert-bridged combination is enumerated. Work is time-sliced so the tab stays responsive
+  // while a full-universe pass runs, and results stream in as they are found.
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [progress, setProgress] = useState({ done: 0, total: 0, assets: 0 });
 
   useEffect(() => {
     if (!market) {
       setOpportunities([]);
-      setProgress({ done: 0, total: 0 });
+      setProgress({ done: 0, total: 0, assets: 0 });
       return;
     }
     const pass = createScanPass(market.instruments, market.tickers, fee, maxLegs, useConvert, convertSpread);
-    const total = pass.starts.length;
+    const total = pass.steps.length;
     const best = new Map<string, Opportunity>();
     let cursor = 0;
     let cancelled = false;
     let frame = 0;
-    setProgress({ done: 0, total });
+    setProgress({ done: 0, total, assets: pass.assetCount });
 
     const step = () => {
       if (cancelled) return;
       const deadline = performance.now() + 40;
       let processed = 0;
-      while (cursor < total && (processed < SCAN_CHUNK || performance.now() < deadline)) {
-        for (const candidate of pass.scanFrom(pass.starts[cursor]!)) {
+      while (cursor < total && (processed < 1 || performance.now() < deadline)) {
+        for (const candidate of pass.steps[cursor]!()) {
           const key = candidate.legs.map((leg) => leg.symbol).sort().join("/");
           const current = best.get(key);
           if (!current || current.net < candidate.net) best.set(key, candidate);
@@ -384,7 +384,7 @@ function Scanner() {
         cursor += 1;
         processed += 1;
       }
-      setProgress({ done: cursor, total });
+      setProgress({ done: cursor, total, assets: pass.assetCount });
       setOpportunities([...best.values()].sort((a, b) => b.net - a.net));
       if (cursor < total) frame = window.requestAnimationFrame(step);
     };
@@ -392,6 +392,7 @@ function Scanner() {
     frame = window.requestAnimationFrame(step);
     return () => { cancelled = true; window.cancelAnimationFrame(frame); };
   }, [market, fee, maxLegs, useConvert, convertSpread]);
+
 
   const scanning = progress.total > 0 && progress.done < progress.total;
   scanningRef.current = scanning;
