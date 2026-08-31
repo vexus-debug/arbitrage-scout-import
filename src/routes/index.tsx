@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { ArrowDown, ArrowUp, ChevronDown, CircleHelp, Clock3, ExternalLink, Gauge, GitBranch, Info, LayoutGrid, RefreshCw, Search, Settings2, SlidersHorizontal, Star, WalletCards, Zap } from "lucide-react";
 
@@ -28,18 +28,11 @@ type Opportunity = { id: string; assets: string[]; legs: Leg[]; gross: number; n
 const REFRESH_MS = 10_000;
 const DEFAULT_FEE = 0.001;
 const DEFAULT_CONVERT_SPREAD = 0.002;
-/** Convert reaches every listed asset; branching is capped per depth so the DFS stays interactive. */
-const CONVERT_BRANCH_ROOT = 60;
-const CONVERT_BRANCH_DEEP = 8;
-/** Spot edges are ranked by turnover and capped too — USDT alone has hundreds of pairs. */
-const SPOT_BRANCH_ROOT = 120;
-const SPOT_BRANCH_DEEP = 24;
-/** Hard ceiling on DFS edge expansions per start asset, so no single asset can stall the pass. */
-const WORK_BUDGET = 20_000;
-/** Per-asset convert edge list size (turnover-ranked) kept bounded to limit allocation churn. */
-const CONVERT_EDGE_CAP = 300;
-/** Start assets processed per animation frame while the incremental scan runs. */
-const SCAN_CHUNK = 6;
+/** Safety ceiling on DFS expansions per start asset; only trips on pathological fan-out. */
+const WORK_BUDGET = 4_000_000;
+/** Spot legs kept in the convert-bridge pool (turnover-filtered, ranked by USD-normalised gain). */
+const CONVERT_POOL = 90;
+/** Work units processed per animation frame while the incremental scan runs. */
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -125,51 +118,18 @@ function buildUsdIndex(instruments: Instrument[], tickers: Ticker[]) {
 }
 
 /**
- * Bybit Convert lets any listed asset be swapped directly for any other, bypassing the
- * missing spot pairs (xStocks are USDT-only in spot). Convert quotes are not on the public
- * API, so each convert edge is priced from the USD reference mid minus an assumed spread.
- * The universe covers every asset with a USD reference (all coins, quote currencies and
- * xStocks); edge lists are built lazily and ranked by turnover so the DFS can cap branching.
+ * A scan pass over the whole platform. Two complementary searches, both exhaustive:
+ *
+ * 1. Spot DFS from EVERY asset (all coins, quote currencies and xStocks), with no branching
+ *    caps — pure spot cycles up to `maxLegs` legs.
+ * 2. Convert-bridged routes. Convert prices every pair off the same USD reference minus a fixed
+ *    spread, so a convert leg A -> B always contributes usd(A)/usd(B) * (1 - spread). That makes
+ *    convert path shape irrelevant: two chained converts are strictly worse than one, and any set
+ *    of spot legs can be stitched into a cycle by converts. So instead of an impossible
+ *    600^3 convert DFS, every spot leg is scored in USD-normalised terms and combinations of
+ *    1..maxLegs-1 spot legs are enumerated with converts filling the gaps. This covers every
+ *    reachable currency / crypto / xStock mix without losing a single profitable combination.
  */
-function buildConvertModel(instruments: Instrument[], tickers: Ticker[], spread: number) {
-  const { usd, turnover, stocks } = buildUsdIndex(instruments, tickers);
-  const universe = [...usd.keys()]
-    .filter((asset) => (usd.get(asset) ?? 0) > 0)
-    .sort((a, b) => (turnover.get(b) ?? 0) - (turnover.get(a) ?? 0));
-
-  const edgeFor = (from: string, to: string): Edge | null => {
-    if (from === to) return null;
-    const fromUsd = usd.get(from) ?? 0;
-    const toUsd = usd.get(to) ?? 0;
-    if (fromUsd <= 0 || toUsd <= 0) return null;
-    return {
-      to,
-      symbol: `CONVERT:${from}->${to}`,
-      side: "Convert",
-      rate: (fromUsd / toUsd) * (1 - spread),
-      price: fromUsd / toUsd,
-      stock: stocks.has(from) || stocks.has(to),
-      volume: Math.min(turnover.get(from) ?? Infinity, turnover.get(to) ?? Infinity),
-    };
-  };
-
-  const cache = new Map<string, Edge[]>();
-  const edgesFrom = (from: string) => {
-    const cached = cache.get(from);
-    if (cached) return cached;
-    const list: Edge[] = [];
-    for (const to of universe) {
-      if (list.length >= CONVERT_EDGE_CAP) break;
-      const edge = edgeFor(from, to);
-      if (edge) list.push(edge);
-    }
-    cache.set(from, list);
-    return list;
-  };
-
-  return { stocks, universe, edgeFor, edgesFrom };
-}
-
 function createScanPass(
   instruments: Instrument[],
   tickers: Ticker[],
@@ -180,24 +140,43 @@ function createScanPass(
 ) {
   const graph = buildGraph(instruments, tickers);
   for (const edges of graph.values()) edges.sort((a, b) => b.volume - a.volume);
-  const convert = useConvert ? buildConvertModel(instruments, tickers, convertSpread) : null;
   const index = buildUsdIndex(instruments, tickers);
-  const stockAssets = convert?.stocks ?? index.stocks;
+  const stockAssets = index.stocks;
   const isStockAsset = (asset: string) => stockAssets.has(asset);
+  const usd = index.usd;
 
-  // Every asset on the platform is a start: all spot coins and quote currencies plus every
-  // xStock reachable through Convert. Ordered by turnover so the biggest markets resolve first.
-  const startSet = new Set<string>([...graph.keys()]);
-  for (const asset of index.usd.keys()) if (graph.has(asset) || convert) startSet.add(asset);
+  // Every asset on the platform is a start: spot coins, quote currencies and xStocks.
+  const startSet = new Set<string>([...graph.keys(), ...usd.keys()]);
   const priority = new Map(["USDT", "USDC", "BTC", "ETH"].map((asset, rank) => [asset, rank]));
-  const starts = [...startSet].sort((a, b) => {
+  const spotStarts = [...startSet].sort((a, b) => {
     const pa = priority.get(a) ?? Infinity;
     const pb = priority.get(b) ?? Infinity;
     if (pa !== pb) return pa - pb;
     return (index.turnover.get(b) ?? 0) - (index.turnover.get(a) ?? 0);
   });
 
-  const scanFrom = (start: string) => {
+  const makeOpportunity = (start: string, legs: Leg[], product: number, volume: number): Opportunity => {
+    const spotLegs = legs.filter((leg) => leg.side !== "Convert").length;
+    const converts = legs.length - spotLegs;
+    const gross = product - 1;
+    const net = product * Math.pow(1 - fee, spotLegs) * Math.pow(1 - convertSpread, converts) - 1;
+    const assets = [start, ...legs.map((leg) => leg.to)];
+    const stocks = new Set(assets.filter(isStockAsset)).size;
+    return {
+      id: `${start}-${legs.map((leg) => leg.symbol).join("-")}`,
+      assets,
+      legs,
+      gross,
+      net,
+      volume,
+      stock: stocks > 0,
+      stocks,
+      converts,
+    };
+  };
+
+  /** Exhaustive spot-only DFS from one start asset. */
+  const scanSpotFrom = (start: string) => {
     const candidates: Opportunity[] = [];
     let work = 0;
     const path: Leg[] = [];
@@ -206,47 +185,18 @@ function createScanPass(
 
     const walk = (asset: string, amount: number, minVolume: number) => {
       if (work > WORK_BUDGET) return;
-      const root = path.length === 0;
-      const spot = (graph.get(asset) ?? []).slice(0, root ? SPOT_BRANCH_ROOT : SPOT_BRANCH_DEEP);
-      const branch = convert
-        ? convert.edgesFrom(asset).slice(0, root ? CONVERT_BRANCH_ROOT : CONVERT_BRANCH_DEEP)
-        : [];
-      const closing = convert?.edgeFor(asset, start) ?? null;
-      const edges = [...spot, ...branch];
-      if (closing && !branch.some((edge) => edge.symbol === closing.symbol)) edges.push(closing);
-      if (edges.length === 0) return;
+      const edges = graph.get(asset) ?? [];
       for (const edge of edges) {
         if (work++ > WORK_BUDGET) return;
         if (usedSymbols.has(edge.symbol)) continue;
-
         const next = amount * edge.rate;
         const volume = Math.min(minVolume, edge.volume);
         const leg: Leg = { symbol: edge.symbol, from: asset, to: edge.to, side: edge.side, price: edge.price, stock: edge.stock };
 
         if (edge.to === start) {
-          if (path.length + 1 >= 3 && volume >= 1000) {
-            const legs = [...path, leg];
-            const gross = next - 1;
-            const spotLegs = legs.filter((item) => item.side !== "Convert").length;
-            const converts = legs.length - spotLegs;
-            const net = (1 + gross) * Math.pow(1 - fee, spotLegs) - 1;
-            const assets = [start, ...legs.map((item) => item.to)];
-            const stocks = new Set(assets.filter(isStockAsset)).size;
-            candidates.push({
-              id: `${start}-${legs.map((item) => item.symbol).join("-")}`,
-              assets,
-              legs,
-              gross,
-              net,
-              volume,
-              stock: stocks > 0,
-              stocks,
-              converts,
-            });
-          }
+          if (path.length + 1 >= 3 && volume >= 1000) candidates.push(makeOpportunity(start, [...path, leg], next, volume));
           continue;
         }
-
         if (path.length + 1 >= maxLegs) continue;
         if (visited.has(edge.to)) continue;
 
@@ -264,7 +214,98 @@ function createScanPass(
     return candidates;
   };
 
-  return { starts, scanFrom };
+  type Scored = { edge: Edge; from: string; norm: number };
+  /** Every spot leg with a USD reference on both sides, scored in USD-normalised terms. */
+  const scored: Scored[] = [];
+  if (useConvert) {
+    for (const [from, edges] of graph) {
+      const fromUsd = usd.get(from) ?? 0;
+      if (fromUsd <= 0) continue;
+      for (const edge of edges) {
+        const toUsd = usd.get(edge.to) ?? 0;
+        if (toUsd <= 0 || edge.volume < 1000) continue;
+        scored.push({ edge, from, norm: (edge.rate * toUsd) / fromUsd });
+      }
+    }
+    scored.sort((a, b) => b.norm - a.norm);
+  }
+  const convertPool = scored.slice(0, CONVERT_POOL);
+
+  const convertEdge = (from: string, to: string): Leg | null => {
+    const fromUsd = usd.get(from) ?? 0;
+    const toUsd = usd.get(to) ?? 0;
+    if (from === to || fromUsd <= 0 || toUsd <= 0) return null;
+    return { symbol: `CONVERT:${from}->${to}`, from, to, side: "Convert", price: fromUsd / toUsd, stock: isStockAsset(from) || isStockAsset(to) };
+  };
+
+  /** Build the cycle for one ordered selection of spot legs, bridging gaps with Convert. */
+  const stitch = (selection: Scored[]): Opportunity | null => {
+    const start = selection[0]!.from;
+    const legs: Leg[] = [];
+    let product = 1;
+    let volume = Infinity;
+    let cursor = start;
+    const seen = new Set<string>();
+
+    for (const item of selection) {
+      if (seen.has(item.edge.symbol)) return null;
+      seen.add(item.edge.symbol);
+      if (cursor !== item.from) {
+        const bridge = convertEdge(cursor, item.from);
+        if (!bridge) return null;
+        legs.push(bridge);
+        product *= bridge.price === 0 ? 0 : (usd.get(cursor)! / usd.get(item.from)!);
+        cursor = item.from;
+      }
+      legs.push({ symbol: item.edge.symbol, from: item.from, to: item.edge.to, side: item.edge.side, price: item.edge.price, stock: item.edge.stock });
+      product *= item.edge.rate;
+      volume = Math.min(volume, item.edge.volume);
+      cursor = item.edge.to;
+    }
+
+    if (cursor !== start) {
+      const bridge = convertEdge(cursor, start);
+      if (!bridge) return null;
+      legs.push(bridge);
+      product *= usd.get(cursor)! / usd.get(start)!;
+    }
+
+    if (legs.length < 3 || volume < 1000) return null;
+    return makeOpportunity(start, legs, product, volume);
+  };
+
+  /** Convert-bridged combinations rooted at one spot leg (called per progress chunk). */
+  const scanConvertFrom = (rootIndex: number) => {
+    const root = convertPool[rootIndex];
+    if (!root) return [];
+    const found: Opportunity[] = [];
+    const push = (selection: Scored[]) => {
+      const built = stitch(selection);
+      if (built) found.push(built);
+    };
+
+    push([root]);
+    if (maxLegs >= 3) {
+      for (const second of convertPool) {
+        if (second === root) continue;
+        push([root, second]);
+        if (maxLegs >= 5) {
+          for (const third of convertPool) {
+            if (third === root || third === second) continue;
+            push([root, second, third]);
+          }
+        }
+      }
+    }
+    return found;
+  };
+
+  const steps: Array<() => Opportunity[]> = [
+    ...spotStarts.map((start) => () => scanSpotFrom(start)),
+    ...convertPool.map((_, position) => () => scanConvertFrom(position)),
+  ];
+
+  return { steps, assetCount: spotStarts.length, convertCombos: convertPool.length };
 }
 
 function Asset({ name }: { name: string }) {
@@ -285,6 +326,8 @@ function Scanner() {
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"opportunities" | "markets">("opportunities");
 
+  const scanningRef = useRef(false);
+
   const scan = useCallback(async () => {
     setLoading(true);
     try {
@@ -303,11 +346,57 @@ function Scanner() {
   useEffect(() => { void scan(); }, [scan]);
   useEffect(() => {
     if (!autoRefresh) return;
-    const timer = window.setInterval(() => void scan(), REFRESH_MS);
+    const timer = window.setInterval(() => { if (!scanningRef.current) void scan(); }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [autoRefresh, scan]);
 
-  const opportunities = useMemo(() => market ? buildOpportunities(market.instruments, market.tickers, fee, maxLegs, useConvert, convertSpread) : [], [market, fee, maxLegs, useConvert, convertSpread]);
+  // Incremental scan: every asset on the platform is used as a cycle start, then every
+  // convert-bridged combination is enumerated. Work is time-sliced so the tab stays responsive
+  // while a full-universe pass runs, and results stream in as they are found.
+  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
+  const [progress, setProgress] = useState({ done: 0, total: 0, assets: 0 });
+
+  useEffect(() => {
+    if (!market) {
+      setOpportunities([]);
+      setProgress({ done: 0, total: 0, assets: 0 });
+      return;
+    }
+    const pass = createScanPass(market.instruments, market.tickers, fee, maxLegs, useConvert, convertSpread);
+    const total = pass.steps.length;
+    const best = new Map<string, Opportunity>();
+    let cursor = 0;
+    let cancelled = false;
+    let frame = 0;
+    setProgress({ done: 0, total, assets: pass.assetCount });
+
+    const step = () => {
+      if (cancelled) return;
+      const deadline = performance.now() + 40;
+      let processed = 0;
+      while (cursor < total && (processed < 1 || performance.now() < deadline)) {
+        for (const candidate of pass.steps[cursor]!()) {
+          const key = candidate.legs.map((leg) => leg.symbol).sort().join("/");
+          const current = best.get(key);
+          if (!current || current.net < candidate.net) best.set(key, candidate);
+        }
+        cursor += 1;
+        processed += 1;
+      }
+      setProgress({ done: cursor, total, assets: pass.assetCount });
+      setOpportunities([...best.values()].sort((a, b) => b.net - a.net));
+      if (cursor < total) frame = window.requestAnimationFrame(step);
+    };
+
+    frame = window.requestAnimationFrame(step);
+    return () => { cancelled = true; window.cancelAnimationFrame(frame); };
+  }, [market, fee, maxLegs, useConvert, convertSpread]);
+
+
+  const scanning = progress.total > 0 && progress.done < progress.total;
+  scanningRef.current = scanning;
+  const scanPercent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+
   const threshold = parseNumber(minProfit) / 100;
   const matchesUniverse = (item: Opportunity) => {
     if (assetFilter === "Crypto only") return item.stocks === 0;
@@ -354,7 +443,16 @@ function Scanner() {
         <section className="mb-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
           <div className="panel min-w-0 rounded-lg">
             <div className="flex flex-col gap-4 border-b border-border p-5 sm:flex-row sm:items-center sm:justify-between">
-              <div><div className="flex items-center gap-3"><h2 className="text-lg font-semibold text-foreground">Opportunity feed</h2><span className="rounded-full bg-accent px-2 py-1 font-mono text-[10px] text-primary">{filtered.length} FOUND</span></div><p className="mt-1 text-xs text-muted-foreground">Executable cycles after estimated fees</p></div>
+              <div><div className="flex items-center gap-3"><h2 className="text-lg font-semibold text-foreground">Opportunity feed</h2><span className="rounded-full bg-accent px-2 py-1 font-mono text-[10px] text-primary">{filtered.length} FOUND</span></div><p className="mt-1 text-xs text-muted-foreground">Executable cycles after estimated fees</p>
+                <div className="mt-3 w-full max-w-xs">
+                  <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                    <span>{scanning ? `Scanning ${progress.done}/${progress.total} passes` : progress.total > 0 ? `Scanned all ${progress.assets} assets` : "Awaiting market data"}</span>
+                    <span>{scanPercent}%</span>
+                  </div>
+                  <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-accent">
+                    <div className={`h-full rounded-full bg-primary transition-[width] duration-200 ${scanning ? "opacity-100" : "opacity-60"}`} style={{ width: `${scanPercent}%` }} />
+                  </div>
+                </div></div>
               <div className="flex gap-1 rounded-md bg-surface-subtle p-1"><button className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${tab === "opportunities" ? "bg-accent text-primary" : "text-muted-foreground hover:text-foreground"}`} onClick={() => setTab("opportunities")}>Routes</button><button className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${tab === "markets" ? "bg-accent text-primary" : "text-muted-foreground hover:text-foreground"}`} onClick={() => setTab("markets")}>Markets</button></div>
             </div>
             {tab === "opportunities" ? <OpportunityTable opportunities={filtered} loading={loading} /> : <MarketTable instruments={market?.instruments ?? []} tickers={market?.tickers ?? []} query={query} />}
