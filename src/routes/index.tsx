@@ -319,7 +319,7 @@ function Scanner() {
   const [market, setMarket] = useState<MarketResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [minProfit, setMinProfit] = useState("0.10");
   const [fee, setFee] = useState(DEFAULT_FEE);
   const [assetFilter, setAssetFilter] = useState("All routes");
