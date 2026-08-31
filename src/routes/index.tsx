@@ -518,6 +518,119 @@ function OpportunityTable({ opportunities, loading, onSelect }: { opportunities:
   return <div className="table-scroll"><div className="min-w-[690px]"><div className="grid grid-cols-[1.6fr_.7fr_.7fr_.7fr_30px] gap-4 px-5 py-3 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground"><span>Route</span><span>Net edge</span><span>Gross</span><span>Liquidity</span><span /></div>{opportunities.slice(0, 8).map((item, index) => { const start = item.assets[0]; if (!start || item.legs.length === 0) return null; return <div role="button" tabIndex={0} onClick={() => onSelect(item)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(item); } }} className="data-row grid cursor-pointer grid-cols-[1.6fr_.7fr_.7fr_.7fr_30px] items-center gap-4 px-5 py-4 outline-none focus-visible:bg-accent/40" key={item.id}><div className="flex flex-wrap items-center gap-2"><span className="w-4 font-mono text-[10px] text-muted-foreground">{String(index + 1).padStart(2, "0")}</span><div className="flex flex-wrap items-center gap-1.5"><Asset name={start} />{item.legs.map((leg, legIndex) => <span className="flex items-center gap-1.5" key={`${item.id}-${legIndex}-${leg.symbol}`}><span className={`route-arrow ${leg.side === "Convert" ? "text-primary" : ""}`} title={leg.side === "Convert" ? `Bybit Convert ${leg.from} → ${leg.to}` : `${leg.side} ${leg.symbol} @ ${formatPrice(leg.price)}`}>{leg.side === "Convert" ? "⇢" : "→"}</span><Asset name={leg.to} /></span>)}</div>{item.stocks > 0 && <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-medium text-warning">{item.stocks > 1 ? `${item.stocks}× xS` : "xS"}</span>}{item.converts > 0 && <span className="rounded bg-accent px-1.5 py-0.5 text-[9px] font-medium text-primary">{item.converts > 1 ? `${item.converts}× CONVERT` : "CONVERT"}</span>}</div><span className="font-mono text-sm font-semibold text-primary">{formatPercent(item.net)}</span><span className="font-mono text-xs text-muted-foreground">{formatPercent(item.gross)}</span><span className="font-mono text-xs text-muted-foreground">${(item.volume / 1000000).toFixed(1)}m</span><Button variant="ghost" size="icon" aria-label={`Inspect ${item.id}`} onClick={(event) => { event.stopPropagation(); onSelect(item); }}><ChevronDown className="h-4 w-4 -rotate-90" /></Button></div>; })}</div></div>;
 }
 
+function formatUnits(value: number) {
+  if (!Number.isFinite(value) || value === 0) return "0";
+  const abs = Math.abs(value);
+  if (abs >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (abs >= 1) return value.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  return value.toLocaleString(undefined, { maximumSignificantDigits: 6 });
+}
+
+function formatUsd(value: number) {
+  const sign = value < 0 ? "-" : "";
+  return `${sign}$${Math.abs(value).toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 6 })}`;
+}
+
+/** Detailed per-leg walkthrough of one route, simulated with a $1 notional. */
+function RouteDetail({ opportunity, fee, convertSpread, fetchedAt, onClose }: { opportunity: Opportunity | null; fee: number; convertSpread: number; fetchedAt?: string; onClose: () => void }) {
+  if (!opportunity) return null;
+  const start = opportunity.assets[0] ?? "";
+
+  // Simulate in units of the start asset: $1 buys 1 notional unit, and because the cycle returns
+  // to `start`, the closing balance is directly comparable to the $1 that went in.
+  let balance = 1;
+  const steps = opportunity.legs.map((leg) => {
+    const rate = leg.side === "Buy" ? 1 / leg.price : leg.side === "Sell" ? leg.price : leg.price;
+    const cost = leg.side === "Convert" ? convertSpread : fee;
+    const before = balance;
+    const gross = before * rate;
+    const charged = gross * cost;
+    balance = gross - charged;
+    return { leg, rate, cost, before, gross, charged, after: balance };
+  });
+
+  const out = balance;
+  const pnl = out - 1;
+  const profitable = pnl >= 0;
+  const spotLegs = opportunity.legs.filter((leg) => leg.side !== "Convert").length;
+  const convertLegs = opportunity.legs.length - spotLegs;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-background/80 p-0 backdrop-blur-sm sm:items-center sm:p-6" role="dialog" aria-modal="true" aria-label={`Route detail ${opportunity.assets.join(" to ")}`} onClick={onClose}>
+      <div className="panel max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-t-lg sm:rounded-lg" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-4 border-b border-border p-5">
+          <div>
+            <div className="eyebrow">Route report</div>
+            <h2 className="mt-1 flex flex-wrap items-center gap-1.5 text-lg font-semibold text-foreground">
+              <Asset name={start} />
+              {opportunity.legs.map((leg, index) => (
+                <span className="flex items-center gap-1.5" key={`detail-${index}-${leg.symbol}`}>
+                  <span className={`route-arrow ${leg.side === "Convert" ? "text-primary" : ""}`}>{leg.side === "Convert" ? "⇢" : "→"}</span>
+                  <Asset name={leg.to} />
+                </span>
+              ))}
+            </h2>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {opportunity.legs.length} legs · {spotLegs} spot @ {(fee * 100).toFixed(2)}% fee{convertLegs > 0 ? ` · ${convertLegs} Convert @ ${(convertSpread * 100).toFixed(2)}% spread` : ""}
+              {fetchedAt ? ` · quotes ${new Date(fetchedAt).toLocaleTimeString()}` : ""}
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={onClose}>Close</Button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 border-b border-border p-5 sm:grid-cols-4">
+          <div><div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Stake</div><div className="mt-1 font-mono text-lg text-foreground">$1.0000</div></div>
+          <div><div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Returns</div><div className="mt-1 font-mono text-lg text-foreground">{formatUsd(out)}</div></div>
+          <div><div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">{profitable ? "Profit" : "Loss"}</div><div className={`mt-1 font-mono text-lg ${profitable ? "text-primary" : "text-coral"}`}>{formatUsd(pnl)}</div></div>
+          <div><div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Net edge</div><div className={`mt-1 font-mono text-lg ${profitable ? "text-primary" : "text-coral"}`}>{formatPercent(pnl)}</div></div>
+        </div>
+
+        <div className="p-5">
+          <div className="mb-3 text-xs font-medium text-foreground">Leg-by-leg conversion</div>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between rounded-md bg-surface-subtle px-3 py-2 text-xs">
+              <span className="text-muted-foreground">Start</span>
+              <span className="font-mono text-foreground">$1.0000 → {formatUnits(1)} {start} notional</span>
+            </div>
+            {steps.map((step, index) => (
+              <div className="rounded-md border border-border p-3" key={`step-${index}-${step.leg.symbol}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm text-foreground">
+                    <span className="font-mono text-[10px] text-muted-foreground">{String(index + 1).padStart(2, "0")}</span>
+                    <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${step.leg.side === "Convert" ? "bg-accent text-primary" : "bg-surface-subtle text-muted-foreground"}`}>{step.leg.side === "Convert" ? "CONVERT" : step.leg.side.toUpperCase()}</span>
+                    <span className="font-mono text-xs">{step.leg.side === "Convert" ? `${step.leg.from} → ${step.leg.to}` : step.leg.symbol}</span>
+                    {step.leg.stock && <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] text-warning">xS</span>}
+                  </div>
+                  <div className="font-mono text-xs text-muted-foreground">
+                    {step.leg.side === "Convert" ? "USD-mid rate" : `${step.leg.side === "Buy" ? "ask" : "bid"} ${formatPrice(step.leg.price)}`}
+                  </div>
+                </div>
+                <div className="mt-2 grid gap-1 font-mono text-[11px] text-muted-foreground sm:grid-cols-2">
+                  <div>In: {formatUnits(step.before)} {step.leg.from}</div>
+                  <div>Rate: 1 {step.leg.from} = {formatUnits(step.rate)} {step.leg.to}</div>
+                  <div>{step.leg.side === "Convert" ? "Spread" : "Fee"} ({(step.cost * 100).toFixed(2)}%): −{formatUnits(step.charged)} {step.leg.to}</div>
+                  <div className="text-foreground">Out: {formatUnits(step.after)} {step.leg.to}</div>
+                </div>
+              </div>
+            ))}
+            <div className="flex items-center justify-between rounded-md bg-surface-subtle px-3 py-2 text-xs">
+              <span className="text-muted-foreground">Close</span>
+              <span className={`font-mono ${profitable ? "text-primary" : "text-coral"}`}>{formatUnits(out)} {start} ≈ {formatUsd(out)} ({formatUsd(pnl)})</span>
+            </div>
+          </div>
+
+          <div className="mt-4 flex gap-2 rounded-md border border-warning/25 bg-warning/10 p-3 text-[11px] leading-4 text-warning">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>Modelled at top-of-book with no slippage. A $1 notional is below Bybit minimum order sizes — this is a ratio simulation, not an executable ticket. Route liquidity is capped by its thinnest leg (${(opportunity.volume / 1_000_000).toFixed(2)}m 24h turnover){convertLegs > 0 ? ", and Convert quotes are modelled from the USD reference mid rather than a live quote" : ""}.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
 function MarketTable({ instruments, tickers, query }: { instruments: Instrument[]; tickers: Ticker[]; query: string }) {
   const rows = instruments.filter((item) => !query || item.symbol.toLowerCase().includes(query.toLowerCase())).slice(0, 16);
   const quotes = new Map(tickers.map((item) => [item.symbol, item]));
