@@ -328,6 +328,7 @@ function Scanner() {
   const [convertSpread, setConvertSpread] = useState(DEFAULT_CONVERT_SPREAD);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"opportunities" | "markets">("opportunities");
+  const [selected, setSelected] = useState<Opportunity | null>(null);
 
   const scanningRef = useRef(false);
 
