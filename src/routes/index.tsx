@@ -229,6 +229,9 @@ function createScanPass(
     }
     scored.sort((a, b) => b.norm - a.norm);
   }
+  /** Every scored leg gets its own pass, so no leg is excluded as a route root. */
+  const convertRoots = scored;
+  /** Bounded pool used for the 2nd/3rd legs so per-root work stays sub-second. */
   const convertPool = scored.slice(0, CONVERT_POOL);
 
   const convertEdge = (from: string, to: string): Leg | null => {
