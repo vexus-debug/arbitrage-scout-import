@@ -319,7 +319,7 @@ function Scanner() {
   const [market, setMarket] = useState<MarketResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [minProfit, setMinProfit] = useState("0.10");
   const [fee, setFee] = useState(DEFAULT_FEE);
   const [assetFilter, setAssetFilter] = useState("All routes");
@@ -339,8 +339,10 @@ function Scanner() {
       if (!response.ok) throw new Error(data.error ?? "Market data unavailable");
       setMarket(data);
       setError(null);
+      return data as MarketResponse;
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Market data unavailable");
+      return null;
     } finally {
       setLoading(false);
     }
@@ -353,19 +355,29 @@ function Scanner() {
     return () => window.clearInterval(timer);
   }, [autoRefresh, scan]);
 
-  // Incremental scan: every asset on the platform is used as a cycle start, then every
-  // convert-bridged combination is enumerated. Work is time-sliced so the tab stays responsive
-  // while a full-universe pass runs, and results stream in as they are found.
+  // Scanning is manual: a request snapshot is only created when the user hits "Scan now".
+  // Work is time-sliced so the tab stays responsive while a full-universe pass runs.
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
   const [progress, setProgress] = useState({ done: 0, total: 0, assets: 0 });
+  type ScanRequest = { market: MarketResponse; fee: number; maxLegs: number; useConvert: boolean; convertSpread: number; id: number };
+  const [scanRequest, setScanRequest] = useState<ScanRequest | null>(null);
+
+  const settings = { fee, maxLegs, useConvert, convertSpread };
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const marketRef = useRef(market);
+  marketRef.current = market;
+
+  const runScan = useCallback(async () => {
+    const data = await scan();
+    const source = data ?? marketRef.current;
+    if (!source) return;
+    setScanRequest({ market: source, ...settingsRef.current, id: Date.now() });
+  }, [scan]);
 
   useEffect(() => {
-    if (!market) {
-      setOpportunities([]);
-      setProgress({ done: 0, total: 0, assets: 0 });
-      return;
-    }
-    const pass = createScanPass(market.instruments, market.tickers, fee, maxLegs, useConvert, convertSpread);
+    if (!scanRequest) return;
+    const pass = createScanPass(scanRequest.market.instruments, scanRequest.market.tickers, scanRequest.fee, scanRequest.maxLegs, scanRequest.useConvert, scanRequest.convertSpread);
     const total = pass.steps.length;
     const best = new Map<string, Opportunity>();
     let cursor = 0;
@@ -393,7 +405,7 @@ function Scanner() {
 
     frame = window.requestAnimationFrame(step);
     return () => { cancelled = true; window.cancelAnimationFrame(frame); };
-  }, [market, fee, maxLegs, useConvert, convertSpread]);
+  }, [scanRequest]);
 
 
   const scanning = progress.total > 0 && progress.done < progress.total;
@@ -449,7 +461,7 @@ function Scanner() {
               <div><div className="flex items-center gap-3"><h2 className="text-lg font-semibold text-foreground">Opportunity feed</h2><span className="rounded-full bg-accent px-2 py-1 font-mono text-[10px] text-primary">{filtered.length} FOUND</span></div><p className="mt-1 text-xs text-muted-foreground">Executable cycles after estimated fees</p>
                 <div className="mt-3 w-full max-w-xs">
                   <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                    <span>{scanning ? `Scanning ${progress.done}/${progress.total} passes` : progress.total > 0 ? `Scanned all ${progress.assets} assets` : "Awaiting market data"}</span>
+                    <span>{scanning ? `Scanning ${progress.done}/${progress.total} passes` : progress.total > 0 ? `Scanned all ${progress.assets} assets` : "Idle — press Scan now"}</span>
                     <span>{scanPercent}%</span>
                   </div>
                   <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-accent">
@@ -471,7 +483,7 @@ function Scanner() {
               <div className="flex items-center justify-between border-t border-border pt-5"><div><div className="text-sm font-medium text-foreground">Bybit Convert legs</div><div className="mt-1 text-xs text-muted-foreground">Stock → stock hops off spot</div></div><button aria-label="Toggle Bybit Convert legs" className="switch-track flex h-5 w-9 cursor-pointer items-center rounded-full p-0.5 transition-colors" data-on={useConvert} onClick={() => setUseConvert((value) => !value)}><span className="switch-thumb h-4 w-4 rounded-full transition-transform" /></button></div>
               <label className={`block transition-opacity ${useConvert ? "" : "pointer-events-none opacity-40"}`}><span className="mb-2 flex items-center justify-between text-xs font-medium text-foreground">Convert spread <span className="font-mono text-muted-foreground">{(convertSpread * 100).toFixed(2)}%</span></span><input className="w-full accent-primary" type="range" min="0" max="0.01" step="0.0005" value={convertSpread} disabled={!useConvert} onChange={(event) => setConvertSpread(Number(event.target.value))} /></label>
               <div className="flex items-center justify-between border-t border-border pt-5"><div><div className="text-sm font-medium text-foreground">Auto refresh</div><div className="mt-1 text-xs text-muted-foreground">Every 10 seconds</div></div><button aria-label="Toggle auto refresh" className="switch-track flex h-5 w-9 cursor-pointer items-center rounded-full p-0.5 transition-colors" data-on={autoRefresh} onClick={() => setAutoRefresh((value) => !value)}><span className="switch-thumb h-4 w-4 rounded-full transition-transform" /></button></div>
-              <Button className="scan-button w-full" onClick={() => void scan()} disabled={loading}><RefreshCw className={loading ? "animate-spin" : ""} /> Scan now</Button>
+              <Button className="scan-button w-full" onClick={() => void runScan()} disabled={loading || scanning}><RefreshCw className={loading || scanning ? "animate-spin" : ""} /> {scanning ? "Scanning…" : "Scan now"}</Button>
             </div>
             <div className="mt-6 flex gap-2 rounded-md border border-warning/25 bg-warning/10 p-3 text-[11px] leading-4 text-warning"><Info className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{useConvert ? <>All {xstocks.length} xStocks trade only against USDT in spot, so stock → stock hops use Bybit Convert. Convert quotes are not public: legs are modelled at the USD reference mid minus the {(convertSpread * 100).toFixed(2)}% spread above, with no exchange fee. Real quotes may be wider, so verify each Convert leg before executing.</> : <>Convert legs are off, so routes are limited to spot pairs and can touch at most one xStock (all {xstocks.length} are USDT-only). Enable Convert to search multi-stock cycles.</>}</span></div>
           </aside>
