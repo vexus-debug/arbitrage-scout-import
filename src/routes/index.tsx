@@ -497,6 +497,13 @@ function Scanner() {
         {error && <div className="mt-6 rounded-md border border-coral/30 bg-coral/10 p-3 text-sm text-coral">{error}. Try refreshing to reconnect.</div>}
         <footer className="mt-8 flex flex-col justify-between gap-2 border-t border-border pt-5 text-[11px] text-muted-foreground sm:flex-row"><span>LOOPLINE / public market data only</span><span>Execution is not included · Verify liquidity, fees, and slippage before trading</span></footer>
       </div>
+      <RouteDetail
+        opportunity={selected}
+        fee={scanRequest?.fee ?? fee}
+        convertSpread={scanRequest?.convertSpread ?? convertSpread}
+        fetchedAt={scanRequest?.market.fetchedAt ?? market?.fetchedAt}
+        onClose={() => setSelected(null)}
+      />
     </main>
   );
 }
