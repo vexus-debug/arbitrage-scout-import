@@ -306,7 +306,51 @@ function Scanner() {
     return () => window.clearInterval(timer);
   }, [autoRefresh, scan]);
 
-  const opportunities = useMemo(() => market ? buildOpportunities(market.instruments, market.tickers, fee, maxLegs, useConvert, convertSpread) : [], [market, fee, maxLegs, useConvert, convertSpread]);
+  // Incremental scan: every asset on the platform is used as a cycle start. Assets are processed
+  // in time-sliced chunks so the tab stays responsive while a full-universe pass runs, and
+  // results stream in as they are found.
+  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+
+  useEffect(() => {
+    if (!market) {
+      setOpportunities([]);
+      setProgress({ done: 0, total: 0 });
+      return;
+    }
+    const pass = createScanPass(market.instruments, market.tickers, fee, maxLegs, useConvert, convertSpread);
+    const total = pass.starts.length;
+    const best = new Map<string, Opportunity>();
+    let cursor = 0;
+    let cancelled = false;
+    let frame = 0;
+    setProgress({ done: 0, total });
+
+    const step = () => {
+      if (cancelled) return;
+      const deadline = performance.now() + 40;
+      let processed = 0;
+      while (cursor < total && (processed < SCAN_CHUNK || performance.now() < deadline)) {
+        for (const candidate of pass.scanFrom(pass.starts[cursor]!)) {
+          const key = candidate.legs.map((leg) => leg.symbol).sort().join("/");
+          const current = best.get(key);
+          if (!current || current.net < candidate.net) best.set(key, candidate);
+        }
+        cursor += 1;
+        processed += 1;
+      }
+      setProgress({ done: cursor, total });
+      setOpportunities([...best.values()].sort((a, b) => b.net - a.net));
+      if (cursor < total) frame = window.requestAnimationFrame(step);
+    };
+
+    frame = window.requestAnimationFrame(step);
+    return () => { cancelled = true; window.cancelAnimationFrame(frame); };
+  }, [market, fee, maxLegs, useConvert, convertSpread]);
+
+  const scanning = progress.total > 0 && progress.done < progress.total;
+  const scanPercent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+
   const threshold = parseNumber(minProfit) / 100;
   const matchesUniverse = (item: Opportunity) => {
     if (assetFilter === "Crypto only") return item.stocks === 0;
