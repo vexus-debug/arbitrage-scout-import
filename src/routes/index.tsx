@@ -29,15 +29,17 @@ const REFRESH_MS = 10_000;
 const DEFAULT_FEE = 0.001;
 const DEFAULT_CONVERT_SPREAD = 0.002;
 /** Convert reaches every listed asset; branching is capped per depth so the DFS stays interactive. */
-const CONVERT_BRANCH_ROOT = 90;
-const CONVERT_BRANCH_DEEP = 10;
+const CONVERT_BRANCH_ROOT = 60;
+const CONVERT_BRANCH_DEEP = 8;
 /** Spot edges are ranked by turnover and capped too — USDT alone has hundreds of pairs. */
-const SPOT_BRANCH_ROOT = 200;
-const SPOT_BRANCH_DEEP = 40;
-/** Hard ceiling on DFS edge expansions per scan, so a full-universe search can never hang the tab. */
-const WORK_BUDGET = 250_000;
+const SPOT_BRANCH_ROOT = 120;
+const SPOT_BRANCH_DEEP = 24;
+/** Hard ceiling on DFS edge expansions per start asset, so no single asset can stall the pass. */
+const WORK_BUDGET = 20_000;
 /** Per-asset convert edge list size (turnover-ranked) kept bounded to limit allocation churn. */
 const CONVERT_EDGE_CAP = 300;
+/** Start assets processed per animation frame while the incremental scan runs. */
+const SCAN_CHUNK = 6;
 
 export const Route = createFileRoute("/")({
   head: () => ({
