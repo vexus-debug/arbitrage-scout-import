@@ -37,7 +37,7 @@ const SPOT_BRANCH_DEEP = 24;
 /** Hard ceiling on DFS edge expansions per start asset, so no single asset can stall the pass. */
 const WORK_BUDGET = 20_000;
 /** Per-asset convert edge list size (turnover-ranked) kept bounded to limit allocation churn. */
-const CONVERT_EDGE_CAP = 300;
+const CONVERT_EDGE_CAP = Infinity;
 /** Start assets processed per animation frame while the incremental scan runs. */
 const SCAN_CHUNK = 6;
 
@@ -207,9 +207,9 @@ function createScanPass(
     const walk = (asset: string, amount: number, minVolume: number) => {
       if (work > WORK_BUDGET) return;
       const root = path.length === 0;
-      const spot = (graph.get(asset) ?? []).slice(0, root ? SPOT_BRANCH_ROOT : SPOT_BRANCH_DEEP);
+      const spot = graph.get(asset) ?? [];
       const branch = convert
-        ? convert.edgesFrom(asset).slice(0, root ? CONVERT_BRANCH_ROOT : CONVERT_BRANCH_DEEP)
+        ? (root ? convert.edgesFrom(asset) : convert.edgesFrom(asset).slice(0, CONVERT_BRANCH_DEEP))
         : [];
       const closing = convert?.edgeFor(asset, start) ?? null;
       const edges = [...spot, ...branch];
