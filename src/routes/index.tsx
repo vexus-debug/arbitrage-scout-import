@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { ArrowDown, ArrowUp, ChevronDown, CircleHelp, Clock3, ExternalLink, Gauge, GitBranch, Info, LayoutGrid, RefreshCw, Search, Settings2, SlidersHorizontal, Star, WalletCards, Zap } from "lucide-react";
 
@@ -284,6 +284,8 @@ function Scanner() {
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"opportunities" | "markets">("opportunities");
 
+  const scanningRef = useRef(false);
+
   const scan = useCallback(async () => {
     setLoading(true);
     try {
@@ -302,7 +304,7 @@ function Scanner() {
   useEffect(() => { void scan(); }, [scan]);
   useEffect(() => {
     if (!autoRefresh) return;
-    const timer = window.setInterval(() => void scan(), REFRESH_MS);
+    const timer = window.setInterval(() => { if (!scanningRef.current) void scan(); }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [autoRefresh, scan]);
 
@@ -349,6 +351,7 @@ function Scanner() {
   }, [market, fee, maxLegs, useConvert, convertSpread]);
 
   const scanning = progress.total > 0 && progress.done < progress.total;
+  scanningRef.current = scanning;
   const scanPercent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
 
   const threshold = parseNumber(minProfit) / 100;
@@ -397,7 +400,16 @@ function Scanner() {
         <section className="mb-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
           <div className="panel min-w-0 rounded-lg">
             <div className="flex flex-col gap-4 border-b border-border p-5 sm:flex-row sm:items-center sm:justify-between">
-              <div><div className="flex items-center gap-3"><h2 className="text-lg font-semibold text-foreground">Opportunity feed</h2><span className="rounded-full bg-accent px-2 py-1 font-mono text-[10px] text-primary">{filtered.length} FOUND</span></div><p className="mt-1 text-xs text-muted-foreground">Executable cycles after estimated fees</p></div>
+              <div><div className="flex items-center gap-3"><h2 className="text-lg font-semibold text-foreground">Opportunity feed</h2><span className="rounded-full bg-accent px-2 py-1 font-mono text-[10px] text-primary">{filtered.length} FOUND</span></div><p className="mt-1 text-xs text-muted-foreground">Executable cycles after estimated fees</p>
+                <div className="mt-3 w-full max-w-xs">
+                  <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                    <span>{scanning ? `Scanning ${progress.done}/${progress.total} assets` : progress.total > 0 ? `Scanned all ${progress.total} assets` : "Awaiting market data"}</span>
+                    <span>{scanPercent}%</span>
+                  </div>
+                  <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-accent">
+                    <div className={`h-full rounded-full bg-primary transition-[width] duration-200 ${scanning ? "opacity-100" : "opacity-60"}`} style={{ width: `${scanPercent}%` }} />
+                  </div>
+                </div></div>
               <div className="flex gap-1 rounded-md bg-surface-subtle p-1"><button className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${tab === "opportunities" ? "bg-accent text-primary" : "text-muted-foreground hover:text-foreground"}`} onClick={() => setTab("opportunities")}>Routes</button><button className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${tab === "markets" ? "bg-accent text-primary" : "text-muted-foreground hover:text-foreground"}`} onClick={() => setTab("markets")}>Markets</button></div>
             </div>
             {tab === "opportunities" ? <OpportunityTable opportunities={filtered} loading={loading} /> : <MarketTable instruments={market?.instruments ?? []} tickers={market?.tickers ?? []} query={query} />}
