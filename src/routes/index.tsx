@@ -28,15 +28,8 @@ type Opportunity = { id: string; assets: string[]; legs: Leg[]; gross: number; n
 const REFRESH_MS = 10_000;
 const DEFAULT_FEE = 0.001;
 const DEFAULT_CONVERT_SPREAD = 0.002;
-/**
- * Convert reaches every listed asset. Spot edges are never capped; convert fan-out is only
- * capped below the first hop, where the full universe would be combinatorially impossible.
- */
-const CONVERT_BRANCH_DEEP = 48;
 /** Safety ceiling on DFS expansions per start asset; only trips on pathological fan-out. */
 const WORK_BUDGET = 4_000_000;
-/** Per-asset convert edge list size (turnover-ranked) kept bounded to limit allocation churn. */
-const CONVERT_EDGE_CAP = Infinity;
 /** Spot legs kept in the convert-bridge pool (turnover-filtered, ranked by USD-normalised gain). */
 const CONVERT_POOL = 90;
 /** Work units processed per animation frame while the incremental scan runs. */
@@ -123,52 +116,6 @@ function buildUsdIndex(instruments: Instrument[], tickers: Ticker[]) {
     }
   }
   return { usd, turnover, stocks };
-}
-
-/**
- * Bybit Convert lets any listed asset be swapped directly for any other, bypassing the
- * missing spot pairs (xStocks are USDT-only in spot). Convert quotes are not on the public
- * API, so each convert edge is priced from the USD reference mid minus an assumed spread.
- * The universe covers every asset with a USD reference (all coins, quote currencies and
- * xStocks); edge lists are built lazily and ranked by turnover so the DFS can cap branching.
- */
-function buildConvertModel(instruments: Instrument[], tickers: Ticker[], spread: number) {
-  const { usd, turnover, stocks } = buildUsdIndex(instruments, tickers);
-  const universe = [...usd.keys()]
-    .filter((asset) => (usd.get(asset) ?? 0) > 0)
-    .sort((a, b) => (turnover.get(b) ?? 0) - (turnover.get(a) ?? 0));
-
-  const edgeFor = (from: string, to: string): Edge | null => {
-    if (from === to) return null;
-    const fromUsd = usd.get(from) ?? 0;
-    const toUsd = usd.get(to) ?? 0;
-    if (fromUsd <= 0 || toUsd <= 0) return null;
-    return {
-      to,
-      symbol: `CONVERT:${from}->${to}`,
-      side: "Convert",
-      rate: (fromUsd / toUsd) * (1 - spread),
-      price: fromUsd / toUsd,
-      stock: stocks.has(from) || stocks.has(to),
-      volume: Math.min(turnover.get(from) ?? Infinity, turnover.get(to) ?? Infinity),
-    };
-  };
-
-  const cache = new Map<string, Edge[]>();
-  const edgesFrom = (from: string) => {
-    const cached = cache.get(from);
-    if (cached) return cached;
-    const list: Edge[] = [];
-    for (const to of universe) {
-      if (list.length >= CONVERT_EDGE_CAP) break;
-      const edge = edgeFor(from, to);
-      if (edge) list.push(edge);
-    }
-    cache.set(from, list);
-    return list;
-  };
-
-  return { stocks, universe, edgeFor, edgesFrom };
 }
 
 /**
